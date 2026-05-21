@@ -10,5 +10,20 @@ res = requests.get('https://wecima.cx', headers=headers)
 soup = BeautifulSoup(res.text, 'html.parser')
 
 print('STATUS:', res.status_code)
-print('--- First 3000 chars of HTML ---')
-print(res.text[:3000])
+print('TOTAL HTML LENGTH:', len(res.text))
+
+# Print all unique class names found in divs and articles
+print('\n--- ALL DIV/ARTICLE CLASSES ---')
+classes = set()
+for tag in soup.find_all(['div', 'article', 'li'], class_=True):
+    for c in tag.get('class', []):
+        classes.add(c)
+for c in sorted(classes):
+    print(c)
+
+# Try to find any links that look like content
+print('\n--- SAMPLE CONTENT LINKS ---')
+for a in soup.find_all('a', href=True)[:30]:
+    href = a.get('href', '')
+    if '/watch/' in href or '/series/' in href or '/anime/' in href:
+        print(href)
