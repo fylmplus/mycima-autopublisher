@@ -18,10 +18,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install requests playwright beautifulsoup4
-          playwright install chromium
-          playwright install-deps chromium
+        run: pip install requests beautifulsoup4 lxml
 
       - name: Test Base44 API
         run: |
