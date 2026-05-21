@@ -1,12 +1,17 @@
-import base64
+import requests
+import json
 
-encoded = "HM6Ly9sdWx1c3Ry+ZWFtLmNvbS9kL2+4zaTkzazBvazM4YQ=="
+BASE44_API_KEY = "YOUR_API_KEY_HERE"
+BASE44_BASE    = "https://mycima.base44.app/api"
+HEADERS_B44    = {"api_key": BASE44_API_KEY, "Content-Type": "application/json"}
 
-for skip in range(0, 5):
-    try:
-        trimmed = encoded[skip:].replace('+', '').replace(' ', '')
-        padded = trimmed + "=" * (4 - len(trimmed) % 4)
-        decoded = base64.b64decode(padded).decode("utf-8")
-        print(f"skip={skip}: {decoded}")
-    except Exception as e:
-        print(f"skip={skip}: FAILED — {e}")
+# Delete the checkpoint so scraper runs again
+res = requests.get(f"{BASE44_BASE}/entities/Setting", headers=HEADERS_B44, 
+                   params={"q": json.dumps({"key": "last_scraped_url"})})
+records = res.json()
+if records:
+    record_id = records[0]["id"]
+    requests.delete(f"{BASE44_BASE}/entities/Setting/{record_id}", headers=HEADERS_B44)
+    print("✅ Checkpoint deleted — scraper will re-run on next trigger")
+else:
+    print("No checkpoint found")
