@@ -6,8 +6,8 @@ import re
 import json
 from datetime import datetime
 
-BASE44_APP_ID  = os.environ.get("BASE44_APP_ID")
 BASE44_API_KEY = os.environ.get("BASE44_API_KEY")
+BASE44_APP_ID  = os.environ.get("BASE44_APP_ID")
 BASE44_BASE    = "https://mycima.base44.app/api"
 HEADERS_B44    = {"api_key": BASE44_API_KEY, "Content-Type": "application/json"}
 
@@ -17,26 +17,40 @@ HEADERS_WEB = {
     "Accept-Language": "ar,en;q=0.9",
 }
 
+VALID_TYPES     = ["movie", "series", "anime", "show"]
+VALID_QUALITIES = ["CAM", "360p", "480p", "720p", "1080p", "4K"]
+VALID_LANGUAGES = ["Arabic", "English", "Turkish", "Indian", "Asian", "French", "Other"]
+
 def b44_get(entity, q=None):
     params = {}
     if q:
         params["q"] = json.dumps(q)
-    res = requests.get(f"{BASE44_BASE}/entities/{entity}", headers=HEADERS_B44, params=params)
-    if res.status_code == 200:
-        return res.json()
-    print(f"  ❌ GET failed {entity}: {res.status_code} - {res.text[:100]}")
+    try:
+        res = requests.get(f"{BASE44_BASE}/entities/{entity}", headers=HEADERS_B44, params=params, timeout=15)
+        if res.status_code == 200:
+            return res.json()
+        print(f"  ❌ GET failed {entity}: {res.status_code} - {res.text[:100]}")
+    except Exception as e:
+        print(f"  ❌ GET exception {entity}: {e}")
     return []
 
 def b44_post(entity, payload):
-    res = requests.post(f"{BASE44_BASE}/entities/{entity}", headers=HEADERS_B44, json=payload)
-    if res.status_code in [200, 201]:
-        return res.json()
-    print(f"  ❌ POST failed {entity}: {res.status_code} - {res.text[:100]}")
+    try:
+        res = requests.post(f"{BASE44_BASE}/entities/{entity}", headers=HEADERS_B44, json=payload, timeout=15)
+        if res.status_code in [200, 201]:
+            return res.json()
+        print(f"  ❌ POST failed {entity}: {res.status_code} - {res.text[:200]}")
+    except Exception as e:
+        print(f"  ❌ POST exception {entity}: {e}")
     return None
 
 def b44_put(entity, record_id, payload):
-    res = requests.put(f"{BASE44_BASE}/entities/{entity}/{record_id}", headers=HEADERS_B44, json=payload)
-    return res.status_code in [200, 204]
+    try:
+        res = requests.put(f"{BASE44_BASE}/entities/{entity}/{record_id}", headers=HEADERS_B44, json=payload, timeout=15)
+        return res.status_code in [200, 204]
+    except Exception as e:
+        print(f"  ❌ PUT exception {entity}: {e}")
+        return False
 
 def get_checkpoint():
     try:
@@ -70,11 +84,30 @@ def detect_type(url, title=""):
         return "show"
     return "movie"
 
+def detect_quality(text):
+    for q in ["4K", "1080p", "720p", "480p", "360p", "CAM"]:
+        if q.lower() in text.lower():
+            return q
+    return "720p"
+
+def detect_language(page_text):
+    if "إنجليزي" in page_text or "english" in page_text.lower():
+        return "English"
+    if "تركي" in page_text:
+        return "Turkish"
+    if "هندي" in page_text:
+        return "Indian"
+    if "آسيوي" in page_text or "asian" in page_text.lower():
+        return "Asian"
+    if "فرنسي" in page_text or "french" in page_text.lower():
+        return "French"
+    return "Arabic"
+
 def scrape_homepage(stop_at_url=None):
     new_items = []
     page = 1
     found_stop = False
-    print("🔍 Scraping Wecima...")
+    print("🔍 Scraping Wecima homepage...")
 
     while not found_stop and page <= 10:
         try:
@@ -84,40 +117,57 @@ def scrape_homepage(stop_at_url=None):
             print(f"  ❌ Page {page} failed: {e}")
             break
 
-        cards = (soup.select("div.GridItem") or soup.select("div.Entry") or
-                 soup.select("article.GridItem") or soup.select(".Grid--WecimaPosts .GridItem"))
+        cards = (
+            soup.select("div.GridItem") or
+            soup.select("div.Entry") or
+            soup.select("article.GridItem") or
+            soup.select(".Grid--WecimaPosts .GridItem")
+        )
 
         if not cards:
-            print(f"  ⚠️ No cards on page {page}")
+            print(f"  ⚠️ No cards found on page {page} — stopping")
             break
 
         for card in cards:
             link_tag = card.select_one("a[href]")
             if not link_tag:
                 continue
+
             item_url = link_tag.get("href", "").strip()
             if not item_url.startswith("http"):
                 item_url = WECIMA_BASE + item_url
+
             if stop_at_url and item_url == stop_at_url:
+                print(f"  ✅ Reached checkpoint — stopping")
                 found_stop = True
                 break
 
-            title_tag = (card.select_one(".Title") or card.select_one("h3") or card.select_one("h2"))
+            title_tag = (
+                card.select_one(".Title") or
+                card.select_one("h3") or
+                card.select_one("h2")
+            )
             title = title_tag.get_text(strip=True) if title_tag else ""
 
             img_tag = card.select_one("img")
             poster = ""
             if img_tag:
-                poster = img_tag.get("data-src") or img_tag.get("data-lazy-src") or img_tag.get("src") or ""
+                poster = (
+                    img_tag.get("data-src") or
+                    img_tag.get("data-lazy-src") or
+                    img_tag.get("src") or ""
+                )
 
             year_tag = card.select_one(".year, .Year")
             year = re.sub(r"[^\d]", "", year_tag.get_text() if year_tag else "")[:4]
 
             if title and item_url:
                 new_items.append({
-                    "url": item_url, "title": title, "poster": poster,
-                    "year": year or str(datetime.now().year),
-                    "type": detect_type(item_url, title),
+                    "url":   item_url,
+                    "title": title,
+                    "poster": poster,
+                    "year":  year or str(datetime.now().year),
+                    "type":  detect_type(item_url, title),
                 })
 
         page += 1
@@ -130,6 +180,7 @@ def scrape_detail(url):
     try:
         res = requests.get(url, headers=HEADERS_WEB, timeout=15)
         soup = BeautifulSoup(res.text, "html.parser")
+        page_text = soup.get_text()
 
         description = ""
         for sel in [".StoryMovieContent", ".Description", "p.story", ".BlockDescription"]:
@@ -151,17 +202,11 @@ def scrape_detail(url):
             if tag:
                 num = re.search(r"(\d+\.?\d*)", tag.get_text())
                 if num:
-                    rating = float(num.group(1))
+                    try:
+                        rating = float(num.group(1))
+                    except:
+                        pass
                     break
-
-        language = "Arabic"
-        page_text = soup.get_text().lower()
-        if "english" in page_text or "إنجليزي" in page_text:
-            language = "English"
-        elif "تركي" in page_text:
-            language = "Turkish"
-        elif "هندي" in page_text:
-            language = "Indian"
 
         embeds = []
         for iframe in soup.select("iframe"):
@@ -174,20 +219,25 @@ def scrape_detail(url):
             for a in soup.select(sel):
                 href = a.get("href", "").strip()
                 label = a.get_text(strip=True)
-                if href and href.startswith("http") and href not in [d["url"] for d in downloads]:
-                    quality = "720p"
-                    for q in ["4K", "1080p", "720p", "480p", "360p", "CAM"]:
-                        if q.lower() in label.lower() or q.lower() in href.lower():
-                            quality = q
-                            break
-                    host_match = re.search(r"https?://(?:www\.)?([^/]+)", href)
-                    host = host_match.group(1).split(".")[0].capitalize() if host_match else "Unknown"
-                    downloads.append({"url": href, "quality": quality, "host": host})
+                if not href or not href.startswith("http"):
+                    continue
+                if href in [d["url"] for d in downloads]:
+                    continue
+                quality = detect_quality(label + " " + href)
+                host_match = re.search(r"https?://(?:www\.)?([^/]+)", href)
+                host = host_match.group(1).split(".")[0].capitalize() if host_match else "Unknown"
+                if not host:
+                    host = "Unknown"
+                downloads.append({"url": href, "quality": quality, "host": host})
 
         return {
-            "description": description, "genres": genres, "rating": rating,
-            "language": language, "embeds": embeds[:6], "downloads": downloads[:12],
-            "is_dubbed": "مدبلج" in page_text,
+            "description":   description,
+            "genres":        genres,
+            "rating":        rating,
+            "language":      detect_language(page_text),
+            "embeds":        embeds[:6],
+            "downloads":     downloads[:12],
+            "is_dubbed":     "مدبلج" in page_text,
             "is_translated": "مترجم" in page_text,
         }
     except Exception as e:
@@ -214,17 +264,25 @@ def push_content(item, detail):
     except:
         year = datetime.now().year
 
+    content_type = item.get("type", "movie")
+    if content_type not in VALID_TYPES:
+        content_type = "movie"
+
+    language = detail.get("language", "Arabic")
+    if language not in VALID_LANGUAGES:
+        language = "Other"
+
     payload = {
-        "title_ar":      item.get("title", ""),
-        "title_en":      item.get("title", ""),
+        "title_ar":      item.get("title", "") or "بدون عنوان",
+        "title_en":      item.get("title", "") or "No Title",
         "slug":          slug,
-        "content_type":  item.get("type", "movie"),
+        "content_type":  content_type,
         "poster_url":    item.get("poster", ""),
         "backdrop_url":  item.get("poster", ""),
         "description":   detail.get("description", ""),
         "year":          year,
         "genre":         detail.get("genres", []),
-        "language":      detail.get("language", "Arabic"),
+        "language":      language,
         "rating":        detail.get("rating", 0.0),
         "is_dubbed":     detail.get("is_dubbed", False),
         "is_translated": detail.get("is_translated", True),
@@ -238,24 +296,32 @@ def push_content(item, detail):
         return None
 
     content_id = result.get("id")
-    print(f"  ✅ Created: {payload['title_ar'][:40]}")
+    print(f"  ✅ Created: {payload['title_ar'][:40]} (id={content_id})")
 
     qualities = ["480p", "720p", "1080p", "4K"]
     for i, embed_url in enumerate(detail.get("embeds", [])):
         q = qualities[i] if i < len(qualities) else "720p"
         dl_url = next((d["url"] for d in detail.get("downloads", []) if d["quality"] == q), "")
         b44_post("VideoLink", {
-            "content_id": content_id, "embed_url": embed_url,
-            "download_url": dl_url, "quality": q,
-            "host_name": "Auto", "link_type": "watch",
+            "content_id":   content_id,
+            "embed_url":    embed_url,
+            "download_url": dl_url,
+            "quality":      q,
+            "host_name":    "Auto",
+            "link_type":    "watch",
         })
         time.sleep(0.3)
 
     for d in detail.get("downloads", []):
+        q = d["quality"] if d["quality"] in VALID_QUALITIES else "720p"
+        host = d.get("host") or "Unknown"
         b44_post("VideoLink", {
-            "content_id": content_id, "embed_url": "",
-            "download_url": d["url"], "quality": d["quality"],
-            "host_name": d["host"], "link_type": "download",
+            "content_id":   content_id,
+            "embed_url":    "",
+            "download_url": d["url"],
+            "quality":      q,
+            "host_name":    host,
+            "link_type":    "download",
         })
         time.sleep(0.3)
 
@@ -290,7 +356,9 @@ def run():
             failed += 1
         time.sleep(1)
 
-    print(f"\n✅ Done — {success} added, {skipped} skipped, {failed} failed")
+    print(f"\n{'='*50}")
+    print(f"✅ Done — {success} added, {skipped} skipped, {failed} failed")
+    print(f"{'='*50}")
 
 if __name__ == "__main__":
     run()
