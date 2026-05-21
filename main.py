@@ -4,6 +4,7 @@ import time
 import os
 import re
 import json
+import base64
 from datetime import datetime
 
 BASE44_API_KEY = os.environ.get("BASE44_API_KEY")
@@ -20,6 +21,31 @@ HEADERS_WEB = {
 VALID_TYPES     = ["movie", "series", "anime", "show"]
 VALID_QUALITIES = ["CAM", "360p", "480p", "720p", "1080p", "4K"]
 VALID_LANGUAGES = ["Arabic", "English", "Turkish", "Indian", "Asian", "French", "Other"]
+
+def decode_wecima_url(encoded):
+    try:
+        # Wecima removes the first 2 chars and adds padding
+        encoded = encoded.replace('+', '').replace(' ', '')
+        # Try direct base64 first
+        try:
+            decoded = base64.b64decode(encoded + "==").decode("utf-8")
+            if decoded.startswith("http"):
+                return decoded
+        except:
+            pass
+        # Try removing first char (their obfuscation)
+        for skip in range(1, 5):
+            try:
+                trimmed = encoded[skip:]
+                padded = trimmed + "=" * (4 - len(trimmed) % 4)
+                decoded = base64.b64decode(padded).decode("utf-8")
+                if decoded.startswith("http"):
+                    return decoded
+            except:
+                continue
+    except:
+        pass
+    return ""
 
 def b44_get(entity, q=None):
     params = {}
@@ -85,9 +111,19 @@ def detect_type(url, title=""):
     return "movie"
 
 def detect_quality(text):
-    for q in ["4K", "1080p", "720p", "480p", "360p", "CAM"]:
-        if q.lower() in text.lower():
-            return q
+    text = text.lower()
+    if "4k" in text or "2160" in text:
+        return "4K"
+    if "1080" in text or "full hd" in text:
+        return "1080p"
+    if "720" in text or " hd" in text:
+        return "720p"
+    if "480" in text:
+        return "480p"
+    if "360" in text:
+        return "360p"
+    if "cam" in text:
+        return "CAM"
     return "720p"
 
 def detect_language(text):
@@ -113,7 +149,6 @@ def already_exists(slug):
 def scrape_rss(stop_at_url=None):
     new_items = []
     print("🔍 Scraping Wecima RSS feed...")
-
     try:
         res = requests.get(f"{WECIMA_BASE}/feed/", headers=HEADERS_WEB, timeout=15)
         soup = BeautifulSoup(res.content, "xml")
@@ -123,37 +158,31 @@ def scrape_rss(stop_at_url=None):
         for item in items:
             link = item.find("link")
             title = item.find("title")
-            pub_date = item.find("pubDate")
-
             item_url = link.get_text(strip=True) if link else ""
             item_title = title.get_text(strip=True) if title else ""
 
             if not item_url or not item_title:
                 continue
-
             if stop_at_url and item_url == stop_at_url:
                 print(f"  ✅ Reached checkpoint — stopping")
                 break
 
-            # Extract poster from content:encoded or description
             poster = ""
             content = item.find("content:encoded") or item.find("description")
             if content:
-                content_text = content.get_text()
-                img_match = re.search(r'src=["\']([^"\']+\.(?:jpg|jpeg|png|webp))["\']', content_text)
+                img_match = re.search(r'src=["\']([^"\']+\.(?:jpg|jpeg|png|webp))["\']', content.get_text())
                 if img_match:
                     poster = img_match.group(1)
 
-            # Extract year from title
             year_match = re.search(r'\b(20\d{2})\b', item_title)
             year = year_match.group(1) if year_match else str(datetime.now().year)
 
             new_items.append({
-                "url":   item_url,
-                "title": item_title,
+                "url":    item_url,
+                "title":  item_title,
                 "poster": poster,
-                "year":  year,
-                "type":  detect_type(item_url, item_title),
+                "year":   year,
+                "type":   detect_type(item_url, item_title),
             })
 
     except Exception as e:
@@ -168,6 +197,7 @@ def scrape_detail(url):
         soup = BeautifulSoup(res.text, "html.parser")
         page_text = soup.get_text()
 
+        # Description
         description = ""
         for sel in [".StoryMovieContent", ".Description", "p.story", ".BlockDescription"]:
             tag = soup.select_one(sel)
@@ -175,6 +205,7 @@ def scrape_detail(url):
                 description = tag.get_text(strip=True)
                 break
 
+        # Genres
         genres = []
         for sel in [".GenresList a", ".Genres a", "a[href*='genre']"]:
             tags = soup.select(sel)
@@ -182,6 +213,7 @@ def scrape_detail(url):
                 genres = [g.get_text(strip=True) for g in tags[:6]]
                 break
 
+        # Rating
         rating = 0.0
         for sel in [".imdb-rating", ".Rating", "[class*='rating' i]"]:
             tag = soup.select_one(sel)
@@ -194,43 +226,61 @@ def scrape_detail(url):
                         pass
                 break
 
-        # Poster — better quality from og:image
+        # Poster from og:image
         poster = ""
         og_image = soup.find("meta", property="og:image")
         if og_image:
             poster = og_image.get("content", "")
 
+        # Embed — check script tags for iframe src
         embeds = []
-        for iframe in soup.select("iframe"):
-            src = (iframe.get("src") or iframe.get("data-src") or "").strip()
-            if src and "youtube" not in src and len(src) > 10:
-                embeds.append(src)
-
-        # Also check scripts for embed URLs
         for script in soup.find_all("script"):
             text = script.get_text()
-            found = re.findall(
-                r'https?://[^\s"\'<>]*(?:embed|player|stream|vidbom|streamwish|doodstream|filemoon)[^\s"\'<>]*',
-                text
-            )
+            # Look for iframe src set via JS
+            found = re.findall(r'["\']https?://[^"\']*(?:embed|player|stream|vidbom|streamwish|dood|filemoon|uqload)[^"\']*["\']', text)
             for f in found:
-                if f not in embeds:
-                    embeds.append(f)
+                clean = f.strip('"\'')
+                if clean not in embeds:
+                    embeds.append(clean)
 
+        # Download links — decode base64 data-href
         downloads = []
-        for sel in ["a.DownloadBtn", ".downloadLinks a", "[class*='download' i] a",
-                    "a[href*='mediafire']", "a[href*='gofile']"]:
-            for a in soup.select(sel):
-                href = a.get("href", "").strip()
-                label = a.get_text(strip=True)
-                if not href or not href.startswith("http"):
-                    continue
-                if href in [d["url"] for d in downloads]:
-                    continue
-                quality = detect_quality(label + " " + href)
-                host_match = re.search(r"https?://(?:www\.)?([^/]+)", href)
-                host = host_match.group(1).split(".")[0].capitalize() if host_match else "Unknown"
-                downloads.append({"url": href, "quality": quality, "host": host or "Unknown"})
+        for li in soup.select("li.download-item[data-href]"):
+            encoded = li.get("data-href", "")
+            decoded_url = decode_wecima_url(encoded)
+
+            # Get quality from the li content
+            resolution = li.select_one(".resolution")
+            quality_tag = li.select_one(".quality")
+            label = ""
+            if resolution:
+                label += resolution.get_text(strip=True)
+            if quality_tag:
+                label += " " + quality_tag.get_text(strip=True)
+
+            quality = detect_quality(label)
+
+            host = "Unknown"
+            if decoded_url:
+                host_match = re.search(r"https?://(?:www\.)?([^/]+)", decoded_url)
+                if host_match:
+                    host = host_match.group(1).split(".")[0].capitalize()
+
+            print(f"    🔗 Download: {quality} | {decoded_url[:60] if decoded_url else 'DECODE FAILED: ' + encoded[:30]}")
+
+            if decoded_url:
+                downloads.append({
+                    "url":     decoded_url,
+                    "quality": quality,
+                    "host":    host or "Unknown"
+                })
+            else:
+                # Store encoded URL as fallback so at least something is saved
+                downloads.append({
+                    "url":     f"https://wecima.cx/go/?url={encoded}",
+                    "quality": quality,
+                    "host":    "Wecima"
+                })
 
         return {
             "description":   description,
