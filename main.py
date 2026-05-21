@@ -8,8 +8,7 @@ from datetime import datetime
 
 BASE44_APP_ID  = os.environ.get("BASE44_APP_ID")
 BASE44_API_KEY = os.environ.get("BASE44_API_KEY")
-BASE44_BASE = f"https://api.base44.com/api/v1/apps/{BASE44_APP_ID}"    
-print(f"🔗 API Base: {BASE44_BASE}")
+BASE44_BASE    = f"https://api.base44.com/api/v1/apps/{BASE44_APP_ID}"
 HEADERS_B44    = {"api_key": BASE44_API_KEY, "Content-Type": "application/json"}
 
 WECIMA_BASE = "https://wecima.cx"
@@ -18,28 +17,55 @@ HEADERS_WEB = {
     "Accept-Language": "ar,en;q=0.9",
 }
 
-# ── BASE44 HELPERS ───────────────────────────────────
+def debug_env():
+    app_id = BASE44_APP_ID or "MISSING"
+    api_key = BASE44_API_KEY or "MISSING"
+    print(f"🔑 APP_ID  : {app_id[:6]}...{app_id[-4:] if len(app_id) > 10 else app_id}")
+    print(f"🔑 API_KEY : {api_key[:6]}...{api_key[-4:] if len(api_key) > 10 else api_key}")
+    print(f"🔗 Base URL: {BASE44_BASE}")
+    if not BASE44_APP_ID or not BASE44_API_KEY:
+        print("❌ FATAL: Missing environment variables. Check GitHub Secrets.")
+        exit(1)
+
 def b44_get(entity, q=None, limit=100):
     params = {"limit": limit}
     if q:
         params["q"] = json.dumps(q)
-    res = requests.get(f"{BASE44_BASE}/entities/{entity}", headers=HEADERS_B44, params=params)
-    if res.status_code == 200:
-        return res.json()
+    try:
+        res = requests.get(f"{BASE44_BASE}/entities/{entity}", headers=HEADERS_B44, params=params, timeout=15)
+        if res.status_code == 200:
+            return res.json()
+        print(f"  ⚠️ GET {entity} returned {res.status_code}")
+    except Exception as e:
+        print(f"  ⚠️ GET {entity} error: {e}")
     return []
 
 def b44_post(entity, payload):
-    res = requests.post(f"{BASE44_BASE}/entities/{entity}", headers=HEADERS_B44, json=payload)
-    if res.status_code in [200, 201]:
-        return res.json()
-    print(f"  ❌ POST failed {entity}: {res.status_code} - {res.text[:100]}")
+    try:
+        res = requests.post(f"{BASE44_BASE}/entities/{entity}", headers=HEADERS_B44, json=payload, timeout=15)
+        if res.status_code in [200, 201]:
+            return res.json()
+        print(f"  ❌ POST {entity} {res.status_code}: {res.text[:80]}")
+    except Exception as e:
+        print(f"  ❌ POST {entity} error: {e}")
     return None
 
 def b44_put(entity, record_id, payload):
-    res = requests.put(f"{BASE44_BASE}/entities/{entity}/{record_id}", headers=HEADERS_B44, json=payload)
-    return res.status_code in [200, 204]
+    try:
+        res = requests.put(f"{BASE44_BASE}/entities/{entity}/{record_id}", headers=HEADERS_B44, json=payload, timeout=15)
+        return res.status_code in [200, 204]
+    except:
+        return False
 
-# ── CHECKPOINT ───────────────────────────────────────
+def test_connection():
+    print("\n🧪 Testing Base44 connection...")
+    res = b44_get("Content", limit=1)
+    if res is not None:
+        print("  ✅ Connection OK")
+        return True
+    print("  ❌ Connection FAILED")
+    return False
+
 def get_checkpoint():
     try:
         records = b44_get("Setting", {"key": "last_scraped_url"})
@@ -56,7 +82,6 @@ def save_checkpoint(url, record_id=None):
         b44_post("Setting", {"key": "last_scraped_url", "value": url})
     print(f"  📌 Checkpoint saved")
 
-# ── SLUG ─────────────────────────────────────────────
 def make_slug(text):
     text = text.lower().strip()
     text = re.sub(r"[^\w\s-]", "", text)
@@ -64,7 +89,6 @@ def make_slug(text):
     text = re.sub(r"-+", "-", text)
     return text[:80].strip("-")
 
-# ── TYPE DETECTION ───────────────────────────────────
 def detect_type(url, title=""):
     if "مسلسل" in title or "/series/" in url.lower():
         return "series"
@@ -74,144 +98,111 @@ def detect_type(url, title=""):
         return "show"
     return "movie"
 
-# ── SCRAPE WECIMA RSS (fast + reliable) ──────────────
 def scrape_rss(stop_at_url=None):
     new_items = []
+    seen_urls = set()
     rss_urls = [
         f"{WECIMA_BASE}/feed/",
         f"{WECIMA_BASE}/feed/?post_type=movie",
         f"{WECIMA_BASE}/feed/?post_type=series",
     ]
-
-    seen_urls = set()
-
     for rss_url in rss_urls:
         try:
             res = requests.get(rss_url, headers=HEADERS_WEB, timeout=15)
             soup = BeautifulSoup(res.content, "xml")
             items = soup.find_all("item")
-
             for item in items:
-                link = item.find("link")
+                link  = item.find("link")
                 title = item.find("title")
                 if not link or not title:
                     continue
-
-                item_url = link.get_text(strip=True)
+                item_url   = link.get_text(strip=True)
                 item_title = title.get_text(strip=True)
-
                 if item_url in seen_urls:
                     continue
                 seen_urls.add(item_url)
-
                 if stop_at_url and item_url == stop_at_url:
                     return new_items
-
-                # Get poster from content or enclosure
                 poster = ""
                 enclosure = item.find("enclosure")
                 if enclosure:
                     poster = enclosure.get("url", "")
-                if not poster:
-                    content = item.find("content:encoded") or item.find("description")
-                    if content:
-                        img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', content.get_text())
-                        if img_match:
-                            poster = img_match.group(1)
-
                 pub_date = item.find("pubDate")
                 year = str(datetime.now().year)
                 if pub_date:
-                    year_match = re.search(r"\d{4}", pub_date.get_text())
-                    if year_match:
-                        year = year_match.group()
-
+                    m = re.search(r"\d{4}", pub_date.get_text())
+                    if m:
+                        year = m.group()
                 new_items.append({
-                    "url":   item_url,
-                    "title": item_title,
+                    "url":    item_url,
+                    "title":  item_title,
                     "poster": poster,
-                    "year":  year,
-                    "type":  detect_type(item_url, item_title),
+                    "year":   year,
+                    "type":   detect_type(item_url, item_title),
                 })
         except Exception as e:
-            print(f"  ⚠️ RSS error {rss_url}: {e}")
-
+            print(f"  ⚠️ RSS error: {e}")
+    print(f"  📡 RSS returned {len(new_items)} items")
     return new_items
 
-# ── SCRAPE HOMEPAGE PAGES (for deeper archive) ────────
 def scrape_pages(stop_at_url=None, max_pages=50):
     new_items = []
     seen_urls = set()
-
     for page in range(1, max_pages + 1):
         try:
-            res = requests.get(f"{WECIMA_BASE}/home/page/{page}/", headers=HEADERS_WEB, timeout=15)
+            res  = requests.get(f"{WECIMA_BASE}/home/page/{page}/", headers=HEADERS_WEB, timeout=15)
             soup = BeautifulSoup(res.text, "html.parser")
         except Exception as e:
-            print(f"  ❌ Page {page} error: {e}")
+            print(f"  ❌ Page {page}: {e}")
             break
-
         cards = (
             soup.select("div.GridItem") or
             soup.select("div.Entry") or
             soup.select("article.GridItem") or
             soup.select(".Grid--WecimaPosts .GridItem")
         )
-
         if not cards:
             print(f"  ⚠️ No cards on page {page} — stopping")
             break
-
         found_stop = False
         for card in cards:
             link_tag = card.select_one("a[href]")
             if not link_tag:
                 continue
-
             item_url = link_tag.get("href", "").strip()
             if not item_url.startswith("http"):
                 item_url = WECIMA_BASE + item_url
-
             if item_url in seen_urls:
                 continue
             seen_urls.add(item_url)
-
             if stop_at_url and item_url == stop_at_url:
                 found_stop = True
                 break
-
             title_tag = card.select_one(".Title") or card.select_one("h3") or card.select_one("h2")
             title = title_tag.get_text(strip=True) if title_tag else ""
-
             img_tag = card.select_one("img")
             poster = ""
             if img_tag:
-                poster = (img_tag.get("data-src") or img_tag.get("data-lazy-src") or img_tag.get("src") or "")
-
+                poster = img_tag.get("data-src") or img_tag.get("data-lazy-src") or img_tag.get("src") or ""
             year_tag = card.select_one(".year, .Year")
             year = re.sub(r"[^\d]", "", year_tag.get_text() if year_tag else "")[:4]
-
             if title and item_url:
                 new_items.append({
-                    "url":   item_url,
-                    "title": title,
+                    "url":    item_url,
+                    "title":  title,
                     "poster": poster,
-                    "year":  year or str(datetime.now().year),
-                    "type":  detect_type(item_url, title),
+                    "year":   year or str(datetime.now().year),
+                    "type":   detect_type(item_url, title),
                 })
-
         if found_stop:
             break
-
         print(f"  📄 Page {page}: +{len(cards)} items")
         time.sleep(1.5)
-
     return new_items
 
-# ── SCRAPE DETAIL PAGE ───────────────────────────────
 def scrape_detail(url):
     try:
-        res = requests.get(url, headers=HEADERS_WEB, timeout=15)
+        res  = requests.get(url, headers=HEADERS_WEB, timeout=15)
         soup = BeautifulSoup(res.text, "html.parser")
 
         description = ""
@@ -248,11 +239,10 @@ def scrape_detail(url):
         elif "فرنسي" in page_text:
             language = "French"
 
-        # Better poster extraction
         poster = ""
-        og_image = soup.find("meta", property="og:image")
-        if og_image:
-            poster = og_image.get("content", "")
+        og = soup.find("meta", property="og:image")
+        if og:
+            poster = og.get("content", "")
         if not poster:
             img = soup.select_one(".MovieImg img, .Poster img, img.thumbnail")
             if img:
@@ -272,7 +262,7 @@ def scrape_detail(url):
         downloads = []
         for sel in ["a.DownloadBtn", ".downloadLinks a", "[class*='download' i] a", "a[href*='/d/']"]:
             for a in soup.select(sel):
-                href = a.get("href", "").strip()
+                href  = a.get("href", "").strip()
                 label = a.get_text(strip=True)
                 if not href or not href.startswith("http"):
                     continue
@@ -302,7 +292,6 @@ def scrape_detail(url):
         print(f"  ❌ Detail error: {e}")
         return {}
 
-# ── CHECK EXISTS ─────────────────────────────────────
 def get_existing(slug):
     try:
         records = b44_get("Content", {"slug": slug}, limit=1)
@@ -312,11 +301,9 @@ def get_existing(slug):
         pass
     return None
 
-# ── PUSH CONTENT ─────────────────────────────────────
 def push_content(item, detail):
     raw_slug = item["url"].split("/watch/")[-1] if "/watch/" in item["url"] else item["url"].split("/")[-1]
-    slug = make_slug(raw_slug)[:80]
-
+    slug     = make_slug(raw_slug)[:80]
     existing = get_existing(slug)
 
     try:
@@ -324,8 +311,7 @@ def push_content(item, detail):
     except:
         year = datetime.now().year
 
-    poster = detail.get("poster") or item.get("poster", "")
-
+    poster  = detail.get("poster") or item.get("poster", "")
     payload = {
         "title_ar":      item.get("title", ""),
         "title_en":      item.get("title", ""),
@@ -346,13 +332,12 @@ def push_content(item, detail):
     }
 
     if existing:
-        content_id = existing.get("id")
+        content_id     = existing.get("id")
         existing_links = b44_get("VideoLink", {"content_id": content_id}, limit=100)
-        existing_urls = {l.get("download_url") or l.get("embed_url") for l in existing_links}
-        new_links = [d for d in detail.get("downloads", []) if d["url"] not in existing_urls]
-
+        existing_urls  = {l.get("download_url") or l.get("embed_url") for l in existing_links}
+        new_links      = [d for d in detail.get("downloads", []) if d["url"] not in existing_urls]
         if new_links:
-            print(f"  🔗 Adding {len(new_links)} new links to existing content")
+            print(f"  🔗 Adding {len(new_links)} new links")
             for d in new_links:
                 b44_post("VideoLink", {
                     "content_id":   content_id,
@@ -364,7 +349,7 @@ def push_content(item, detail):
                 })
                 time.sleep(0.2)
         else:
-            print(f"  ⏭️ Links already exist ({len(existing_links)})")
+            print(f"  ⏭️ Already exists, no new links")
         return content_id
 
     result = b44_post("Content", payload)
@@ -376,7 +361,7 @@ def push_content(item, detail):
 
     qualities = ["480p", "720p", "1080p", "4K"]
     for i, embed_url in enumerate(detail.get("embeds", [])):
-        q = qualities[i] if i < len(qualities) else "720p"
+        q      = qualities[i] if i < len(qualities) else "720p"
         dl_url = next((d["url"] for d in detail.get("downloads", []) if d["quality"] == q), "")
         b44_post("VideoLink", {
             "content_id":   content_id,
@@ -401,16 +386,20 @@ def push_content(item, detail):
 
     return content_id
 
-# ── MAIN ─────────────────────────────────────────────
 def run():
     print(f"\n{'='*50}")
     print(f"🚀 MyCima Auto-Publisher — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"{'='*50}")
 
-    last_url, checkpoint_id = get_checkpoint()
-    print(f"📌 Last scraped: {last_url[:60] if last_url else 'First run — full scrape'}")
+    debug_env()
 
-    # Try RSS first (fast), then fallback to page scraping
+    if not test_connection():
+        print("❌ Cannot connect to Base44. Check APP_ID and API_KEY secrets.")
+        exit(1)
+
+    last_url, checkpoint_id = get_checkpoint()
+    print(f"\n📌 Last scraped: {last_url[:60] if last_url else 'First run'}")
+
     print("\n📡 Step 1: RSS feed...")
     items = scrape_rss(stop_at_url=last_url)
 
@@ -418,24 +407,22 @@ def run():
         print(f"\n📄 Step 2: Page scraping (up to 50 pages)...")
         items += scrape_pages(stop_at_url=last_url, max_pages=50)
 
-    # Deduplicate
     seen = set()
-    unique_items = []
+    unique = []
     for item in items:
         if item["url"] not in seen:
             seen.add(item["url"])
-            unique_items.append(item)
-    items = unique_items
+            unique.append(item)
+    items = unique
 
-    print(f"\n📦 Total new items to process: {len(items)}")
-
+    print(f"\n📦 Total items to process: {len(items)}")
     if not items:
         print("✅ Nothing new.")
         return
 
     save_checkpoint(items[0]["url"], checkpoint_id)
 
-    success = skipped = failed = 0
+    success = failed = 0
     for i, item in enumerate(items):
         print(f"\n[{i+1}/{len(items)}] {item['title'][:50]}")
         detail = scrape_detail(item["url"])
@@ -453,3 +440,4 @@ def run():
 
 if __name__ == "__main__":
     run()
+    
