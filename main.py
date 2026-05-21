@@ -20,7 +20,7 @@ BASE44_HEADERS = {
 
 # ── BASE44 API HELPERS ───────────────────────────────
 def b44_get(entity, filters=None):
-    url = f"https://api.base44.com/v1/apps/{BASE44_APP_ID}/entities/{entity}"
+    url = f"https://api.base44.com/api/v1/apps/{BASE44_APP_ID}/entities/{entity}"
     params = {}
     if filters:
         params.update(filters)
@@ -30,7 +30,7 @@ def b44_get(entity, filters=None):
     return []
 
 def b44_post(entity, payload):
-    url = f"https://api.base44.com/v1/apps/{BASE44_APP_ID}/entities/{entity}"
+    url = f"https://api.base44.com/api/v1/apps/{BASE44_APP_ID}/entities/{entity}"
     res = requests.post(url, headers=BASE44_HEADERS, json=payload)
     if res.status_code in [200, 201]:
         return res.json()
@@ -38,7 +38,7 @@ def b44_post(entity, payload):
     return None
 
 def b44_patch(entity, record_id, payload):
-    url = f"https://api.base44.com/v1/apps/{BASE44_APP_ID}/entities/{entity}/{record_id}"
+    url = f"https://api.base44.com/api/v1/apps/{BASE44_APP_ID}/entities/{entity}"
     res = requests.patch(url, headers=BASE44_HEADERS, json=payload)
     return res.status_code in [200, 204]
 
