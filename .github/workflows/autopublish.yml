@@ -1,0 +1,28 @@
+name: MyCima Auto Publisher
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'  # every 4 hours
+  workflow_dispatch:         # manual trigger button too
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run scraper
+        env:
+          BASE44_API_KEY: ${{ secrets.BASE44_API_KEY }}
+          BASE44_APP_ID: ${{ secrets.BASE44_APP_ID }}
+        run: python main.py
