@@ -8,7 +8,8 @@ from datetime import datetime
 
 BASE44_APP_ID  = os.environ.get("BASE44_APP_ID")
 BASE44_API_KEY = os.environ.get("BASE44_API_KEY")
-BASE44_BASE    = f"https://api.base44.com/api/v1/apps/{BASE44_APP_ID}"
+BASE44_BASE = f"https://api.base44.com/api/v1/apps/{BASE44_APP_ID}"    
+print(f"🔗 API Base: {BASE44_BASE}")
 HEADERS_B44    = {"api_key": BASE44_API_KEY, "Content-Type": "application/json"}
 
 WECIMA_BASE = "https://wecima.cx"
