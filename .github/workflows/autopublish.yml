@@ -1,9 +1,8 @@
 name: MyCima Auto Publisher
-
 on:
   schedule:
-    - cron: '0 */4 * * *'  # every 4 hours
-  workflow_dispatch:         # manual trigger button too
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -20,6 +19,13 @@ jobs:
 
       - name: Install dependencies
         run: pip install requests beautifulsoup4
+
+      - name: Test Base44 API
+        run: |
+          echo "Testing Base44 API..."
+          curl -s -w "\nHTTP_CODE:%{http_code}" \
+            -H "api_key: ${{ secrets.BASE44_API_KEY }}" \
+            "https://mycima.base44.app/api/entities/Setting"
 
       - name: Run scraper
         env:
