@@ -3,11 +3,12 @@ from bs4 import BeautifulSoup
 import time
 import os
 import re
+import json
 from datetime import datetime
 
 BASE44_APP_ID  = os.environ.get("BASE44_APP_ID")
 BASE44_API_KEY = os.environ.get("BASE44_API_KEY")
-BASE44_BASE    = f"https://api.base44.com/api/v1/apps/{BASE44_APP_ID}"
+BASE44_BASE    = "https://mycima.base44.app/api"
 HEADERS_B44    = {"api_key": BASE44_API_KEY, "Content-Type": "application/json"}
 
 WECIMA_BASE = "https://wecima.cx"
@@ -19,11 +20,11 @@ HEADERS_WEB = {
 def b44_get(entity, q=None):
     params = {}
     if q:
-        import json
         params["q"] = json.dumps(q)
     res = requests.get(f"{BASE44_BASE}/entities/{entity}", headers=HEADERS_B44, params=params)
     if res.status_code == 200:
         return res.json()
+    print(f"  ❌ GET failed {entity}: {res.status_code} - {res.text[:100]}")
     return []
 
 def b44_post(entity, payload):
@@ -196,7 +197,7 @@ def scrape_detail(url):
 def already_exists(slug):
     try:
         records = b44_get("Content", {"slug": slug})
-        return len(records) > 0
+        return isinstance(records, list) and len(records) > 0
     except:
         return False
 
@@ -206,7 +207,7 @@ def push_content(item, detail):
 
     if already_exists(slug):
         print(f"  ⏭️ Already exists")
-        return None
+        return "exists"
 
     try:
         year = int(item.get("year", str(datetime.now().year))[:4])
@@ -217,7 +218,7 @@ def push_content(item, detail):
         "title_ar":      item.get("title", ""),
         "title_en":      item.get("title", ""),
         "slug":          slug,
-        "content_type":  item.get("type", "movie"),   # ← correct field name
+        "content_type":  item.get("type", "movie"),
         "poster_url":    item.get("poster", ""),
         "backdrop_url":  item.get("poster", ""),
         "description":   detail.get("description", ""),
@@ -281,7 +282,7 @@ def run():
         detail = scrape_detail(item["url"])
         time.sleep(1.5)
         result = push_content(item, detail)
-        if result is None and already_exists(make_slug(item["url"].split("/")[-1])):
+        if result == "exists":
             skipped += 1
         elif result:
             success += 1
