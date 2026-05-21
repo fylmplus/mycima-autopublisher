@@ -6,8 +6,8 @@ import re
 from datetime import datetime
 
 # ── CONFIG ──────────────────────────────────────────
-BASE44_API_KEY = os.environ.get("1bd0b8448aeb43488ebb5bfbe8ff7e4a")
-BASE44_APP_ID  = os.environ.get("6a0e5dbc61dc7c96d9538c95")
+BASE44_API_KEY = os.environ.get("BASE44_API_KEY")
+BASE44_APP_ID  = os.environ.get("BASE44_APP_ID")
 WECIMA_BASE    = "https://wecima.cx"
 HEADERS        = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
