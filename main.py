@@ -1,10 +1,11 @@
-import requests
-from bs4 import BeautifulSoup
-import time
+import asyncio
 import os
 import re
 import json
+import time
 from datetime import datetime
+from playwright.async_api import async_playwright
+import requests
 
 BASE44_API_KEY = os.environ.get("BASE44_API_KEY")
 BASE44_APP_ID  = os.environ.get("BASE44_APP_ID")
@@ -12,10 +13,6 @@ BASE44_BASE    = "https://mycima.base44.app/api"
 HEADERS_B44    = {"api_key": BASE44_API_KEY, "Content-Type": "application/json"}
 
 WECIMA_BASE = "https://wecima.cx"
-HEADERS_WEB = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "ar,en;q=0.9",
-}
 
 VALID_TYPES     = ["movie", "series", "anime", "show"]
 VALID_QUALITIES = ["CAM", "360p", "480p", "720p", "1080p", "4K"]
@@ -31,7 +28,7 @@ def b44_get(entity, q=None):
             return res.json()
         print(f"  ❌ GET failed {entity}: {res.status_code} - {res.text[:100]}")
     except Exception as e:
-        print(f"  ❌ GET exception {entity}: {e}")
+        print(f"  ❌ GET exception: {e}")
     return []
 
 def b44_post(entity, payload):
@@ -41,7 +38,7 @@ def b44_post(entity, payload):
             return res.json()
         print(f"  ❌ POST failed {entity}: {res.status_code} - {res.text[:200]}")
     except Exception as e:
-        print(f"  ❌ POST exception {entity}: {e}")
+        print(f"  ❌ POST exception: {e}")
     return None
 
 def b44_put(entity, record_id, payload):
@@ -49,7 +46,7 @@ def b44_put(entity, record_id, payload):
         res = requests.put(f"{BASE44_BASE}/entities/{entity}/{record_id}", headers=HEADERS_B44, json=payload, timeout=15)
         return res.status_code in [200, 204]
     except Exception as e:
-        print(f"  ❌ PUT exception {entity}: {e}")
+        print(f"  ❌ PUT exception: {e}")
         return False
 
 def get_checkpoint():
@@ -103,122 +100,159 @@ def detect_language(page_text):
         return "French"
     return "Arabic"
 
-def scrape_homepage(stop_at_url=None):
+def already_exists(slug):
+    try:
+        records = b44_get("Content", {"slug": slug})
+        return isinstance(records, list) and len(records) > 0
+    except:
+        return False
+
+async def scrape_homepage_pw(browser, stop_at_url=None):
     new_items = []
-    page = 1
+    page = await browser.new_page()
     found_stop = False
+
     print("🔍 Scraping Wecima homepage...")
 
-    while not found_stop and page <= 10:
+    for page_num in range(1, 11):
+        if found_stop:
+            break
         try:
-            res = requests.get(f"{WECIMA_BASE}/home/page/{page}", headers=HEADERS_WEB, timeout=15)
-            soup = BeautifulSoup(res.text, "html.parser")
-        except Exception as e:
-            print(f"  ❌ Page {page} failed: {e}")
-            break
+            await page.goto(f"{WECIMA_BASE}/home/page/{page_num}", timeout=30000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(2000)
 
-        cards = (
-            soup.select("div.GridItem") or
-            soup.select("div.Entry") or
-            soup.select("article.GridItem") or
-            soup.select(".Grid--WecimaPosts .GridItem")
-        )
-
-        if not cards:
-            print(f"  ⚠️ No cards found on page {page} — stopping")
-            break
-
-        for card in cards:
-            link_tag = card.select_one("a[href]")
-            if not link_tag:
-                continue
-
-            item_url = link_tag.get("href", "").strip()
-            if not item_url.startswith("http"):
-                item_url = WECIMA_BASE + item_url
-
-            if stop_at_url and item_url == stop_at_url:
-                print(f"  ✅ Reached checkpoint — stopping")
-                found_stop = True
+            cards = await page.query_selector_all("div.GridItem, article.GridItem")
+            if not cards:
+                print(f"  ⚠️ No cards on page {page_num}")
                 break
 
-            title_tag = (
-                card.select_one(".Title") or
-                card.select_one("h3") or
-                card.select_one("h2")
-            )
-            title = title_tag.get_text(strip=True) if title_tag else ""
+            for card in cards:
+                link_tag = await card.query_selector("a[href]")
+                if not link_tag:
+                    continue
 
-            img_tag = card.select_one("img")
-            poster = ""
-            if img_tag:
-                poster = (
-                    img_tag.get("data-src") or
-                    img_tag.get("data-lazy-src") or
-                    img_tag.get("src") or ""
-                )
+                item_url = await link_tag.get_attribute("href") or ""
+                item_url = item_url.strip()
+                if not item_url.startswith("http"):
+                    item_url = WECIMA_BASE + item_url
 
-            year_tag = card.select_one(".year, .Year")
-            year = re.sub(r"[^\d]", "", year_tag.get_text() if year_tag else "")[:4]
+                if stop_at_url and item_url == stop_at_url:
+                    found_stop = True
+                    break
 
-            if title and item_url:
-                new_items.append({
-                    "url":   item_url,
-                    "title": title,
-                    "poster": poster,
-                    "year":  year or str(datetime.now().year),
-                    "type":  detect_type(item_url, title),
-                })
+                title_tag = await card.query_selector(".Title, h3, h2")
+                title = await title_tag.inner_text() if title_tag else ""
+                title = title.strip()
 
-        page += 1
-        time.sleep(1.5)
+                img_tag = await card.query_selector("img")
+                poster = ""
+                if img_tag:
+                    poster = (await img_tag.get_attribute("data-src") or
+                              await img_tag.get_attribute("data-lazy-src") or
+                              await img_tag.get_attribute("src") or "")
 
+                year_tag = await card.query_selector(".year, .Year")
+                year_text = await year_tag.inner_text() if year_tag else ""
+                year = re.sub(r"[^\d]", "", year_text)[:4]
+
+                if title and item_url:
+                    new_items.append({
+                        "url":    item_url,
+                        "title":  title,
+                        "poster": poster,
+                        "year":   year or str(datetime.now().year),
+                        "type":   detect_type(item_url, title),
+                    })
+
+        except Exception as e:
+            print(f"  ❌ Page {page_num} error: {e}")
+            break
+
+        await asyncio.sleep(1.5)
+
+    await page.close()
     print(f"  📦 Found {len(new_items)} new items")
     return new_items
 
-def scrape_detail(url):
-    try:
-        res = requests.get(url, headers=HEADERS_WEB, timeout=15)
-        soup = BeautifulSoup(res.text, "html.parser")
-        page_text = soup.get_text()
+async def scrape_detail_pw(browser, url):
+    page = await browser.new_page()
+    detail = {}
 
+    # Collect all network requests to catch video URLs
+    video_urls = []
+
+    def on_request(request):
+        req_url = request.url
+        for keyword in ["embed", "player", "stream", "vidbom", "streamwish",
+                        "doodstream", "filemoon", "uqload", "mp4upload", "ok.ru"]:
+            if keyword in req_url.lower():
+                video_urls.append(req_url)
+
+    page.on("request", on_request)
+
+    try:
+        await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(3000)
+
+        page_text = await page.inner_text("body")
+
+        # Description
         description = ""
         for sel in [".StoryMovieContent", ".Description", "p.story", ".BlockDescription"]:
-            tag = soup.select_one(sel)
-            if tag:
-                description = tag.get_text(strip=True)
+            el = await page.query_selector(sel)
+            if el:
+                description = await el.inner_text()
+                description = description.strip()
                 break
 
+        # Genres
         genres = []
         for sel in [".GenresList a", ".Genres a", "a[href*='genre']"]:
-            tags = soup.select(sel)
-            if tags:
-                genres = [g.get_text(strip=True) for g in tags[:6]]
+            els = await page.query_selector_all(sel)
+            if els:
+                for el in els[:6]:
+                    t = await el.inner_text()
+                    genres.append(t.strip())
                 break
 
+        # Rating
         rating = 0.0
         for sel in [".imdb-rating", ".Rating", "[class*='rating' i]"]:
-            tag = soup.select_one(sel)
-            if tag:
-                num = re.search(r"(\d+\.?\d*)", tag.get_text())
+            el = await page.query_selector(sel)
+            if el:
+                text = await el.inner_text()
+                num = re.search(r"(\d+\.?\d*)", text)
                 if num:
                     try:
                         rating = float(num.group(1))
                     except:
                         pass
-                    break
+                break
 
+        # Iframes (static)
         embeds = []
-        for iframe in soup.select("iframe"):
-            src = (iframe.get("src") or iframe.get("data-src") or "").strip()
+        iframes = await page.query_selector_all("iframe")
+        for iframe in iframes:
+            src = await iframe.get_attribute("src") or await iframe.get_attribute("data-src") or ""
+            src = src.strip()
             if src and "youtube" not in src and len(src) > 10:
                 embeds.append(src)
 
+        # Add dynamically captured video URLs
+        for vu in video_urls:
+            if vu not in embeds:
+                embeds.append(vu)
+
+        # Download links
         downloads = []
-        for sel in ["a.DownloadBtn", ".downloadLinks a", "[class*='download' i] a"]:
-            for a in soup.select(sel):
-                href = a.get("href", "").strip()
-                label = a.get_text(strip=True)
+        for sel in ["a.DownloadBtn", ".downloadLinks a", "[class*='download' i] a",
+                    "a[href*='mediafire']", "a[href*='gofile']", "a[href*='1fichier']"]:
+            els = await page.query_selector_all(sel)
+            for el in els:
+                href = await el.get_attribute("href") or ""
+                href = href.strip()
+                label = await el.inner_text()
+                label = label.strip()
                 if not href or not href.startswith("http"):
                     continue
                 if href in [d["url"] for d in downloads]:
@@ -226,11 +260,9 @@ def scrape_detail(url):
                 quality = detect_quality(label + " " + href)
                 host_match = re.search(r"https?://(?:www\.)?([^/]+)", href)
                 host = host_match.group(1).split(".")[0].capitalize() if host_match else "Unknown"
-                if not host:
-                    host = "Unknown"
-                downloads.append({"url": href, "quality": quality, "host": host})
+                downloads.append({"url": href, "quality": quality, "host": host or "Unknown"})
 
-        return {
+        detail = {
             "description":   description,
             "genres":        genres,
             "rating":        rating,
@@ -240,16 +272,12 @@ def scrape_detail(url):
             "is_dubbed":     "مدبلج" in page_text,
             "is_translated": "مترجم" in page_text,
         }
+
     except Exception as e:
         print(f"  ❌ Detail error: {e}")
-        return {}
 
-def already_exists(slug):
-    try:
-        records = b44_get("Content", {"slug": slug})
-        return isinstance(records, list) and len(records) > 0
-    except:
-        return False
+    await page.close()
+    return detail
 
 def push_content(item, detail):
     raw_slug = item["url"].split("/watch/")[-1] if "/watch/" in item["url"] else item["url"].split("/")[-1]
@@ -327,7 +355,7 @@ def push_content(item, detail):
 
     return content_id
 
-def run():
+async def main():
     print(f"\n{'='*50}")
     print(f"🚀 MyCima Auto-Publisher — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"{'='*50}")
@@ -335,30 +363,37 @@ def run():
     last_url, checkpoint_id = get_checkpoint()
     print(f"📌 Last scraped: {last_url[:60] if last_url else 'First run'}")
 
-    new_items = scrape_homepage(stop_at_url=last_url)
-    if not new_items:
-        print("✅ Nothing new.")
-        return
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
 
-    save_checkpoint(new_items[0]["url"], checkpoint_id)
+        new_items = await scrape_homepage_pw(browser, stop_at_url=last_url)
 
-    success = skipped = failed = 0
-    for i, item in enumerate(new_items):
-        print(f"\n[{i+1}/{len(new_items)}] {item['title'][:50]}")
-        detail = scrape_detail(item["url"])
-        time.sleep(1.5)
-        result = push_content(item, detail)
-        if result == "exists":
-            skipped += 1
-        elif result:
-            success += 1
-        else:
-            failed += 1
-        time.sleep(1)
+        if not new_items:
+            print("✅ Nothing new.")
+            await browser.close()
+            return
+
+        save_checkpoint(new_items[0]["url"], checkpoint_id)
+
+        success = skipped = failed = 0
+        for i, item in enumerate(new_items):
+            print(f"\n[{i+1}/{len(new_items)}] {item['title'][:50]}")
+            detail = await scrape_detail_pw(browser, item["url"])
+            await asyncio.sleep(1.5)
+            result = push_content(item, detail)
+            if result == "exists":
+                skipped += 1
+            elif result:
+                success += 1
+            else:
+                failed += 1
+            await asyncio.sleep(1)
+
+        await browser.close()
 
     print(f"\n{'='*50}")
     print(f"✅ Done — {success} added, {skipped} skipped, {failed} failed")
     print(f"{'='*50}")
 
 if __name__ == "__main__":
-    run()
+    asyncio.run(main())
