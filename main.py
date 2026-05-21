@@ -1,11 +1,10 @@
-import asyncio
+import requests
+from bs4 import BeautifulSoup
+import time
 import os
 import re
 import json
-import time
 from datetime import datetime
-from playwright.async_api import async_playwright
-import requests
 
 BASE44_API_KEY = os.environ.get("BASE44_API_KEY")
 BASE44_APP_ID  = os.environ.get("BASE44_APP_ID")
@@ -13,6 +12,10 @@ BASE44_BASE    = "https://mycima.base44.app/api"
 HEADERS_B44    = {"api_key": BASE44_API_KEY, "Content-Type": "application/json"}
 
 WECIMA_BASE = "https://wecima.cx"
+HEADERS_WEB = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "ar,en;q=0.9",
+}
 
 VALID_TYPES     = ["movie", "series", "anime", "show"]
 VALID_QUALITIES = ["CAM", "360p", "480p", "720p", "1080p", "4K"]
@@ -87,16 +90,16 @@ def detect_quality(text):
             return q
     return "720p"
 
-def detect_language(page_text):
-    if "إنجليزي" in page_text or "english" in page_text.lower():
+def detect_language(text):
+    if "إنجليزي" in text or "english" in text.lower():
         return "English"
-    if "تركي" in page_text:
+    if "تركي" in text:
         return "Turkish"
-    if "هندي" in page_text:
+    if "هندي" in text:
         return "Indian"
-    if "آسيوي" in page_text or "asian" in page_text.lower():
+    if "آسيوي" in text or "asian" in text.lower():
         return "Asian"
-    if "فرنسي" in page_text or "french" in page_text.lower():
+    if "فرنسي" in text or "french" in text.lower():
         return "French"
     return "Arabic"
 
@@ -107,121 +110,83 @@ def already_exists(slug):
     except:
         return False
 
-async def scrape_homepage_pw(browser, stop_at_url=None):
+def scrape_rss(stop_at_url=None):
     new_items = []
-    page = await browser.new_page()
-    found_stop = False
+    print("🔍 Scraping Wecima RSS feed...")
 
-    print("🔍 Scraping Wecima homepage...")
+    try:
+        res = requests.get(f"{WECIMA_BASE}/feed/", headers=HEADERS_WEB, timeout=15)
+        soup = BeautifulSoup(res.content, "xml")
+        items = soup.find_all("item")
+        print(f"  📡 RSS returned {len(items)} items")
 
-    for page_num in range(1, 11):
-        if found_stop:
-            break
-        try:
-            await page.goto(f"{WECIMA_BASE}/home/page/{page_num}", timeout=30000, wait_until="domcontentloaded")
-            await page.wait_for_timeout(2000)
+        for item in items:
+            link = item.find("link")
+            title = item.find("title")
+            pub_date = item.find("pubDate")
 
-            cards = await page.query_selector_all("div.GridItem, article.GridItem")
-            if not cards:
-                print(f"  ⚠️ No cards on page {page_num}")
+            item_url = link.get_text(strip=True) if link else ""
+            item_title = title.get_text(strip=True) if title else ""
+
+            if not item_url or not item_title:
+                continue
+
+            if stop_at_url and item_url == stop_at_url:
+                print(f"  ✅ Reached checkpoint — stopping")
                 break
 
-            for card in cards:
-                link_tag = await card.query_selector("a[href]")
-                if not link_tag:
-                    continue
+            # Extract poster from content:encoded or description
+            poster = ""
+            content = item.find("content:encoded") or item.find("description")
+            if content:
+                content_text = content.get_text()
+                img_match = re.search(r'src=["\']([^"\']+\.(?:jpg|jpeg|png|webp))["\']', content_text)
+                if img_match:
+                    poster = img_match.group(1)
 
-                item_url = await link_tag.get_attribute("href") or ""
-                item_url = item_url.strip()
-                if not item_url.startswith("http"):
-                    item_url = WECIMA_BASE + item_url
+            # Extract year from title
+            year_match = re.search(r'\b(20\d{2})\b', item_title)
+            year = year_match.group(1) if year_match else str(datetime.now().year)
 
-                if stop_at_url and item_url == stop_at_url:
-                    found_stop = True
-                    break
+            new_items.append({
+                "url":   item_url,
+                "title": item_title,
+                "poster": poster,
+                "year":  year,
+                "type":  detect_type(item_url, item_title),
+            })
 
-                title_tag = await card.query_selector(".Title, h3, h2")
-                title = await title_tag.inner_text() if title_tag else ""
-                title = title.strip()
+    except Exception as e:
+        print(f"  ❌ RSS error: {e}")
 
-                img_tag = await card.query_selector("img")
-                poster = ""
-                if img_tag:
-                    poster = (await img_tag.get_attribute("data-src") or
-                              await img_tag.get_attribute("data-lazy-src") or
-                              await img_tag.get_attribute("src") or "")
-
-                year_tag = await card.query_selector(".year, .Year")
-                year_text = await year_tag.inner_text() if year_tag else ""
-                year = re.sub(r"[^\d]", "", year_text)[:4]
-
-                if title and item_url:
-                    new_items.append({
-                        "url":    item_url,
-                        "title":  title,
-                        "poster": poster,
-                        "year":   year or str(datetime.now().year),
-                        "type":   detect_type(item_url, title),
-                    })
-
-        except Exception as e:
-            print(f"  ❌ Page {page_num} error: {e}")
-            break
-
-        await asyncio.sleep(1.5)
-
-    await page.close()
     print(f"  📦 Found {len(new_items)} new items")
     return new_items
 
-async def scrape_detail_pw(browser, url):
-    page = await browser.new_page()
-    detail = {}
-
-    # Collect all network requests to catch video URLs
-    video_urls = []
-
-    def on_request(request):
-        req_url = request.url
-        for keyword in ["embed", "player", "stream", "vidbom", "streamwish",
-                        "doodstream", "filemoon", "uqload", "mp4upload", "ok.ru"]:
-            if keyword in req_url.lower():
-                video_urls.append(req_url)
-
-    page.on("request", on_request)
-
+def scrape_detail(url):
     try:
-        await page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        await page.wait_for_timeout(3000)
+        res = requests.get(url, headers=HEADERS_WEB, timeout=15)
+        soup = BeautifulSoup(res.text, "html.parser")
+        page_text = soup.get_text()
 
-        page_text = await page.inner_text("body")
-
-        # Description
         description = ""
         for sel in [".StoryMovieContent", ".Description", "p.story", ".BlockDescription"]:
-            el = await page.query_selector(sel)
-            if el:
-                description = await el.inner_text()
-                description = description.strip()
+            tag = soup.select_one(sel)
+            if tag:
+                description = tag.get_text(strip=True)
                 break
 
-        # Genres
         genres = []
         for sel in [".GenresList a", ".Genres a", "a[href*='genre']"]:
-            els = await page.query_selector_all(sel)
-            if els:
-                for el in els[:6]:
-                    t = await el.inner_text()
-                    genres.append(t.strip())
+            tags = soup.select(sel)
+            if tags:
+                genres = [g.get_text(strip=True) for g in tags[:6]]
                 break
 
-        # Rating
         rating = 0.0
         for sel in [".imdb-rating", ".Rating", "[class*='rating' i]"]:
-            el = await page.query_selector(sel)
-            if el:
-                text = await el.inner_text()
-                num = re.search(r"(\d+\.?\d*)", text)
+            tag = soup.select_one(sel)
+            if tag:
+                num = re.search(r"(\d+\.?\d*)", tag.get_text())
                 if num:
                     try:
                         rating = float(num.group(1))
@@ -229,30 +194,35 @@ async def scrape_detail_pw(browser, url):
                         pass
                 break
 
-        # Iframes (static)
+        # Poster — better quality from og:image
+        poster = ""
+        og_image = soup.find("meta", property="og:image")
+        if og_image:
+            poster = og_image.get("content", "")
+
         embeds = []
-        iframes = await page.query_selector_all("iframe")
-        for iframe in iframes:
-            src = await iframe.get_attribute("src") or await iframe.get_attribute("data-src") or ""
-            src = src.strip()
+        for iframe in soup.select("iframe"):
+            src = (iframe.get("src") or iframe.get("data-src") or "").strip()
             if src and "youtube" not in src and len(src) > 10:
                 embeds.append(src)
 
-        # Add dynamically captured video URLs
-        for vu in video_urls:
-            if vu not in embeds:
-                embeds.append(vu)
+        # Also check scripts for embed URLs
+        for script in soup.find_all("script"):
+            text = script.get_text()
+            found = re.findall(
+                r'https?://[^\s"\'<>]*(?:embed|player|stream|vidbom|streamwish|doodstream|filemoon)[^\s"\'<>]*',
+                text
+            )
+            for f in found:
+                if f not in embeds:
+                    embeds.append(f)
 
-        # Download links
         downloads = []
         for sel in ["a.DownloadBtn", ".downloadLinks a", "[class*='download' i] a",
-                    "a[href*='mediafire']", "a[href*='gofile']", "a[href*='1fichier']"]:
-            els = await page.query_selector_all(sel)
-            for el in els:
-                href = await el.get_attribute("href") or ""
-                href = href.strip()
-                label = await el.inner_text()
-                label = label.strip()
+                    "a[href*='mediafire']", "a[href*='gofile']"]:
+            for a in soup.select(sel):
+                href = a.get("href", "").strip()
+                label = a.get_text(strip=True)
                 if not href or not href.startswith("http"):
                     continue
                 if href in [d["url"] for d in downloads]:
@@ -262,22 +232,20 @@ async def scrape_detail_pw(browser, url):
                 host = host_match.group(1).split(".")[0].capitalize() if host_match else "Unknown"
                 downloads.append({"url": href, "quality": quality, "host": host or "Unknown"})
 
-        detail = {
+        return {
             "description":   description,
             "genres":        genres,
             "rating":        rating,
+            "poster":        poster,
             "language":      detect_language(page_text),
             "embeds":        embeds[:6],
             "downloads":     downloads[:12],
             "is_dubbed":     "مدبلج" in page_text,
             "is_translated": "مترجم" in page_text,
         }
-
     except Exception as e:
         print(f"  ❌ Detail error: {e}")
-
-    await page.close()
-    return detail
+        return {}
 
 def push_content(item, detail):
     raw_slug = item["url"].split("/watch/")[-1] if "/watch/" in item["url"] else item["url"].split("/")[-1]
@@ -300,13 +268,15 @@ def push_content(item, detail):
     if language not in VALID_LANGUAGES:
         language = "Other"
 
+    poster = detail.get("poster") or item.get("poster", "")
+
     payload = {
         "title_ar":      item.get("title", "") or "بدون عنوان",
         "title_en":      item.get("title", "") or "No Title",
         "slug":          slug,
         "content_type":  content_type,
-        "poster_url":    item.get("poster", ""),
-        "backdrop_url":  item.get("poster", ""),
+        "poster_url":    poster,
+        "backdrop_url":  poster,
         "description":   detail.get("description", ""),
         "year":          year,
         "genre":         detail.get("genres", []),
@@ -355,7 +325,7 @@ def push_content(item, detail):
 
     return content_id
 
-async def main():
+def run():
     print(f"\n{'='*50}")
     print(f"🚀 MyCima Auto-Publisher — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"{'='*50}")
@@ -363,37 +333,30 @@ async def main():
     last_url, checkpoint_id = get_checkpoint()
     print(f"📌 Last scraped: {last_url[:60] if last_url else 'First run'}")
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+    new_items = scrape_rss(stop_at_url=last_url)
+    if not new_items:
+        print("✅ Nothing new.")
+        return
 
-        new_items = await scrape_homepage_pw(browser, stop_at_url=last_url)
+    save_checkpoint(new_items[0]["url"], checkpoint_id)
 
-        if not new_items:
-            print("✅ Nothing new.")
-            await browser.close()
-            return
-
-        save_checkpoint(new_items[0]["url"], checkpoint_id)
-
-        success = skipped = failed = 0
-        for i, item in enumerate(new_items):
-            print(f"\n[{i+1}/{len(new_items)}] {item['title'][:50]}")
-            detail = await scrape_detail_pw(browser, item["url"])
-            await asyncio.sleep(1.5)
-            result = push_content(item, detail)
-            if result == "exists":
-                skipped += 1
-            elif result:
-                success += 1
-            else:
-                failed += 1
-            await asyncio.sleep(1)
-
-        await browser.close()
+    success = skipped = failed = 0
+    for i, item in enumerate(new_items):
+        print(f"\n[{i+1}/{len(new_items)}] {item['title'][:50]}")
+        detail = scrape_detail(item["url"])
+        time.sleep(1.5)
+        result = push_content(item, detail)
+        if result == "exists":
+            skipped += 1
+        elif result:
+            success += 1
+        else:
+            failed += 1
+        time.sleep(1)
 
     print(f"\n{'='*50}")
     print(f"✅ Done — {success} added, {skipped} skipped, {failed} failed")
     print(f"{'='*50}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run()
