@@ -24,27 +24,17 @@ VALID_LANGUAGES = ["Arabic", "English", "Turkish", "Indian", "Asian", "French", 
 
 def decode_wecima_url(encoded):
     try:
-        # Wecima removes the first 2 chars and adds padding
         encoded = encoded.replace('+', '').replace(' ', '')
-        # Try direct base64 first
-        try:
-            decoded = base64.b64decode(encoded + "==").decode("utf-8")
-            if decoded.startswith("http"):
-                return decoded
-        except:
-            pass
-        # Try removing first char (their obfuscation)
-        for skip in range(1, 5):
-            try:
-                trimmed = encoded[skip:]
-                padded = trimmed + "=" * (4 - len(trimmed) % 4)
-                decoded = base64.b64decode(padded).decode("utf-8")
-                if decoded.startswith("http"):
-                    return decoded
-            except:
-                continue
-    except:
-        pass
+        trimmed = encoded[3:]
+        padded = trimmed + "=" * (4 - len(trimmed) % 4)
+        decoded = base64.b64decode(padded).decode("utf-8")
+        # Add https: if missing
+        if decoded.startswith("//"):
+            decoded = "https:" + decoded
+        if decoded.startswith("http"):
+            return decoded
+    except Exception as e:
+        print(f"    ⚠️ Decode failed: {e}")
     return ""
 
 def b44_get(entity, q=None):
