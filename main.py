@@ -28,13 +28,39 @@ def decode_wecima_url(encoded):
         trimmed = encoded[3:]
         padded = trimmed + "=" * (4 - len(trimmed) % 4)
         decoded = base64.b64decode(padded).decode("utf-8")
-        # Add https: if missing
         if decoded.startswith("//"):
             decoded = "https:" + decoded
         if decoded.startswith("http"):
             return decoded
     except Exception as e:
         print(f"    ⚠️ Decode failed: {e}")
+    return ""
+
+def get_embed_from_download(download_url):
+    try:
+        if "lulustream.com/d/" in download_url:
+            vid_id = download_url.split("/d/")[1].split("?")[0]
+            return f"https://lulustream.com/e/{vid_id}"
+        if "doodstream.com/d/" in download_url:
+            vid_id = download_url.split("/d/")[1].split("?")[0]
+            return f"https://doodstream.com/e/{vid_id}"
+        if "mixdrop.ps/f/" in download_url:
+            vid_id = download_url.split("/f/")[1].split("?")[0]
+            return f"https://mixdrop.ps/e/{vid_id}"
+        if "abstream.to/d/" in download_url:
+            vid_id = download_url.split("/d/")[1].split("?")[0]
+            return f"https://abstream.to/e/{vid_id}"
+        if "savefiles.com/d/" in download_url:
+            vid_id = download_url.split("/d/")[1].split("?")[0]
+            return f"https://savefiles.com/e/{vid_id}"
+        if "dhcplay.com/" in download_url:
+            vid_id = download_url.split("dhcplay.com/")[1].split("?")[0]
+            return f"https://dhcplay.com/e/{vid_id}"
+        if "byselapuix.com/d/" in download_url:
+            vid_id = download_url.split("/d/")[1].split("?")[0]
+            return f"https://byselapuix.com/e/{vid_id}"
+    except:
+        pass
     return ""
 
 def b44_get(entity, q=None):
@@ -187,7 +213,6 @@ def scrape_detail(url):
         soup = BeautifulSoup(res.text, "html.parser")
         page_text = soup.get_text()
 
-        # Description
         description = ""
         for sel in [".StoryMovieContent", ".Description", "p.story", ".BlockDescription"]:
             tag = soup.select_one(sel)
@@ -195,7 +220,6 @@ def scrape_detail(url):
                 description = tag.get_text(strip=True)
                 break
 
-        # Genres
         genres = []
         for sel in [".GenresList a", ".Genres a", "a[href*='genre']"]:
             tags = soup.select(sel)
@@ -203,7 +227,6 @@ def scrape_detail(url):
                 genres = [g.get_text(strip=True) for g in tags[:6]]
                 break
 
-        # Rating
         rating = 0.0
         for sel in [".imdb-rating", ".Rating", "[class*='rating' i]"]:
             tag = soup.select_one(sel)
@@ -216,30 +239,16 @@ def scrape_detail(url):
                         pass
                 break
 
-        # Poster from og:image
         poster = ""
         og_image = soup.find("meta", property="og:image")
         if og_image:
             poster = og_image.get("content", "")
 
-        # Embed — check script tags for iframe src
-        embeds = []
-        for script in soup.find_all("script"):
-            text = script.get_text()
-            # Look for iframe src set via JS
-            found = re.findall(r'["\']https?://[^"\']*(?:embed|player|stream|vidbom|streamwish|dood|filemoon|uqload)[^"\']*["\']', text)
-            for f in found:
-                clean = f.strip('"\'')
-                if clean not in embeds:
-                    embeds.append(clean)
-
-        # Download links — decode base64 data-href
         downloads = []
         for li in soup.select("li.download-item[data-href]"):
             encoded = li.get("data-href", "")
             decoded_url = decode_wecima_url(encoded)
 
-            # Get quality from the li content
             resolution = li.select_one(".resolution")
             quality_tag = li.select_one(".quality")
             label = ""
@@ -256,21 +265,14 @@ def scrape_detail(url):
                 if host_match:
                     host = host_match.group(1).split(".")[0].capitalize()
 
-            print(f"    🔗 Download: {quality} | {decoded_url[:60] if decoded_url else 'DECODE FAILED: ' + encoded[:30]}")
+            print(f"    🔗 {quality} | {decoded_url[:60] if decoded_url else 'DECODE FAILED'}")
 
-            if decoded_url:
-                downloads.append({
-                    "url":     decoded_url,
-                    "quality": quality,
-                    "host":    host or "Unknown"
-                })
-            else:
-                # Store encoded URL as fallback so at least something is saved
-                downloads.append({
-                    "url":     f"https://wecima.cx/go/?url={encoded}",
-                    "quality": quality,
-                    "host":    "Wecima"
-                })
+            final_url = decoded_url if decoded_url else f"https://wecima.cx/go/?url={encoded}"
+            downloads.append({
+                "url":     final_url,
+                "quality": quality,
+                "host":    host or "Unknown"
+            })
 
         return {
             "description":   description,
@@ -278,7 +280,6 @@ def scrape_detail(url):
             "rating":        rating,
             "poster":        poster,
             "language":      detect_language(page_text),
-            "embeds":        embeds[:6],
             "downloads":     downloads[:12],
             "is_dubbed":     "مدبلج" in page_text,
             "is_translated": "مترجم" in page_text,
@@ -286,6 +287,39 @@ def scrape_detail(url):
     except Exception as e:
         print(f"  ❌ Detail error: {e}")
         return {}
+
+def push_video_links(content_id, detail):
+    for d in detail.get("downloads", []):
+        q = d["quality"] if d["quality"] in VALID_QUALITIES else "720p"
+        host = d.get("host") or "Unknown"
+        embed_url = get_embed_from_download(d["url"])
+        b44_post("VideoLink", {
+            "content_id":   content_id,
+            "embed_url":    embed_url,
+            "download_url": d["url"],
+            "quality":      q,
+            "host_name":    host,
+            "link_type":    "watch",
+        })
+        time.sleep(0.3)
+
+def update_existing_links(item, detail):
+    raw_slug = item["url"].split("/watch/")[-1] if "/watch/" in item["url"] else item["url"].split("/")[-1]
+    slug = make_slug(raw_slug)[:80]
+
+    records = b44_get("Content", {"slug": slug})
+    if not records or len(records) == 0:
+        return
+
+    content_id = records[0].get("id")
+
+    existing_links = b44_get("VideoLink", {"content_id": content_id})
+    if existing_links and len(existing_links) > 0:
+        print(f"  ⏭️ Links already exist ({len(existing_links)})")
+        return
+
+    print(f"  🔗 Adding {len(detail.get('downloads', []))} links to existing content")
+    push_video_links(content_id, detail)
 
 def push_content(item, detail):
     raw_slug = item["url"].split("/watch/")[-1] if "/watch/" in item["url"] else item["url"].split("/")[-1]
@@ -335,34 +369,7 @@ def push_content(item, detail):
 
     content_id = result.get("id")
     print(f"  ✅ Created: {payload['title_ar'][:40]} (id={content_id})")
-
-    qualities = ["480p", "720p", "1080p", "4K"]
-    for i, embed_url in enumerate(detail.get("embeds", [])):
-        q = qualities[i] if i < len(qualities) else "720p"
-        dl_url = next((d["url"] for d in detail.get("downloads", []) if d["quality"] == q), "")
-        b44_post("VideoLink", {
-            "content_id":   content_id,
-            "embed_url":    embed_url,
-            "download_url": dl_url,
-            "quality":      q,
-            "host_name":    "Auto",
-            "link_type":    "watch",
-        })
-        time.sleep(0.3)
-
-    for d in detail.get("downloads", []):
-        q = d["quality"] if d["quality"] in VALID_QUALITIES else "720p"
-        host = d.get("host") or "Unknown"
-        b44_post("VideoLink", {
-            "content_id":   content_id,
-            "embed_url":    "",
-            "download_url": d["url"],
-            "quality":      q,
-            "host_name":    host,
-            "link_type":    "download",
-        })
-        time.sleep(0.3)
-
+    push_video_links(content_id, detail)
     return content_id
 
 def run():
@@ -387,6 +394,7 @@ def run():
         time.sleep(1.5)
         result = push_content(item, detail)
         if result == "exists":
+            update_existing_links(item, detail)
             skipped += 1
         elif result:
             success += 1
@@ -395,7 +403,7 @@ def run():
         time.sleep(1)
 
     print(f"\n{'='*50}")
-    print(f"✅ Done — {success} added, {skipped} skipped, {failed} failed")
+    print(f"✅ Done — {success} added, {skipped} updated, {failed} failed")
     print(f"{'='*50}")
 
 if __name__ == "__main__":
